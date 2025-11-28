@@ -1,124 +1,331 @@
 import express from "express";
+import puppeteer from "puppeteer";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ---------------------------------------------------------------------
-// Channel embed sources
-// ---------------------------------------------------------------------
+// Where to scrape from
 const CHANNEL_SOURCES = {
   "10": "https://www.livehdtv.com/embed/arutz10",
-  "12": "https://www.livehdtv.com/embed/channel-12-live-stream-from-israel"
+  "12": "https://www.cxtvlive.com/live-tv/channel-12-israel"
 };
 
-// ---------------------------------------------------------------------
-// Cache
-// ---------------------------------------------------------------------
+// Cache of latest working URLs
 const channelCache = {
   "10": { url: null, lastUpdated: null, lastError: null },
   "12": { url: null, lastUpdated: null, lastError: null }
 };
 
-// ---------------------------------------------------------------------
-// Helper: fetch raw HTML from livehdtv using Node 22 native fetch
-// ---------------------------------------------------------------------
-async function fetchHtml(url, channelId) {
-  console.log(new Date().toISOString(), "-", "Fetching HTML for channel", channelId);
+let browserPromise = null;
 
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-        "AppleWebKit/537.36 (KHTML, like Gecko) " +
-        "Chrome/131.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      "Connection": "keep-alive"
+// Simple sleep helper
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Launch a single shared browser
+async function getBrowser() {
+  if (!browserPromise) {
+    console.log("Launching Puppeteer browser");
+    browserPromise = puppeteer.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox"
+      ]
+    });
+  }
+  return browserPromise;
+}
+
+// Try to click a generic "play" on the main page
+async function tryClickPlayOnPage(page, channelId) {
+  console.log(`Trying main-page play click for channel ${channelId}`);
+
+  // Channel-specific selectors (we can extend if you inspect the DOM)
+  const channelSelectors = {
+    "12": [
+      ".jw-icon-playback",
+      ".jw-display-icon-container",
+      ".jw-display-icon",
+      ".jw-icon",
+      "button[aria-label='Play']"
+    ],
+    "10": [
+      ".vjs-big-play-button",
+      "button[aria-label='Play']",
+      "button[title='Play']"
+    ]
+  };
+
+  const selectors = channelSelectors[channelId] || [];
+
+  // Try specific selectors first
+  for (const sel of selectors) {
+    try {
+      const exists = await page.$(sel);
+      if (exists) {
+        console.log(`Clicking selector on main page for channel ${channelId}: ${sel}`);
+        await page.click(sel);
+        return;
+      }
+    } catch (e) {
+      console.log(`Error clicking selector ${sel} for channel ${channelId}:`, e.message);
+    }
+  }
+
+  // Generic fallback inside the page
+  await page.evaluate(() => {
+    const genericSelectors = [
+      ".jw-icon-playback",
+      ".jw-display-icon-container",
+      ".jw-display-icon",
+      ".jw-icon",
+      ".vjs-big-play-button",
+      "button[aria-label='Play']",
+      "button[title='Play']",
+      "button.play"
+    ];
+
+    for (const sel of genericSelectors) {
+      const el = document.querySelector(sel);
+      if (el) {
+        el.click();
+        return;
+      }
+    }
+
+    const video = document.querySelector("video");
+    if (video) {
+      video.click();
     }
   });
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} while fetching channel ${channelId}`);
-  }
-
-  const html = await res.text();
-  return html;
 }
 
-// ---------------------------------------------------------------------
-// Extract m3u8 URL from JWPlayer setup
-// ---------------------------------------------------------------------
-function extractM3u8FromHtml(html, channelId) {
-  // Looks for: file: "https://....m3u8?token=..."
-  const fileRegex = /file\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i;
-  const match = html.match(fileRegex);
+// Try to click play inside iframes (in case the player is inside an iframe)
+async function tryClickPlayInFrames(page, channelId) {
+  console.log(`Trying iframe play click for channel ${channelId}`);
 
-  if (!match) {
-    throw new Error("Could not find m3u8 token in JWPlayer config for channel " + channelId);
+  const channelSelectors = {
+    "12": [
+      ".jw-icon-playback",
+      ".jw-display-icon-container",
+      ".jw-display-icon",
+      ".jw-icon",
+      "button[aria-label='Play']"
+    ],
+    "10": [
+      ".vjs-big-play-button",
+      "button[aria-label='Play']",
+      "button[title='Play']"
+    ]
+  };
+
+  const selectors = channelSelectors[channelId] || [];
+  const frames = page.frames();
+
+  for (const frame of frames) {
+    for (const sel of selectors) {
+      try {
+        const exists = await frame.$(sel);
+        if (exists) {
+          console.log(`Clicking selector in frame for channel ${channelId}: ${sel} (frame URL: ${frame.url()})`);
+          await frame.click(sel);
+          return;
+        }
+      } catch (e) {
+        // Ignore and continue
+      }
+    }
+
+    // Generic fallbacks inside frame
+    try {
+      await frame.evaluate(() => {
+        const genericSelectors = [
+          ".jw-icon-playback",
+          ".jw-display-icon-container",
+          ".jw-display-icon",
+          ".jw-icon",
+          ".vjs-big-play-button",
+          "button[aria-label='Play']",
+          "button[title='Play']",
+          "button.play"
+        ];
+
+        for (const sel of genericSelectors) {
+          const el = document.querySelector(sel);
+          if (el) {
+            el.click();
+            return;
+          }
+        }
+
+        const video = document.querySelector("video");
+        if (video) {
+          video.click();
+        }
+      });
+    } catch (e) {
+      // Ignore frame errors
+    }
   }
-
-  return match[1];
 }
 
-// ---------------------------------------------------------------------
-// Refresh logic
-// ---------------------------------------------------------------------
-async function refreshChannel(id) {
-  const url = CHANNEL_SOURCES[id];
-  if (!url) return;
+// Core scraper: load page, click play, capture m3u8
+async function fetchM3u8FromEmbed(channelId) {
+  const embedUrl = CHANNEL_SOURCES[channelId];
+  if (!embedUrl) throw new Error("Unknown channel " + channelId);
 
-  const previous = channelCache[id].url;
+  console.log(`Fetching m3u8 for channel ${channelId} from ${embedUrl}`);
+
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+
+  let m3u8Url = null;
+  let requestCount = 0;
 
   try {
-    const html = await fetchHtml(url, id);
-    const m3u8 = extractM3u8FromHtml(html, id);
+    await page.setViewport({ width: 1280, height: 720 });
 
-    if (m3u8 !== previous) {
-      console.log(new Date().toISOString(), "-", `Channel ${id} URL updated`);
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+      "AppleWebKit/537.36 (KHTML, like Gecko) " +
+      "Chrome/131.0.0.0 Safari/537.36"
+    );
+
+    // Listen to all requests, capture first .m3u8
+    page.on("request", req => {
+      const url = req.url();
+      requestCount += 1;
+
+      if (requestCount <= 10) {
+        console.log(`Sample request ${requestCount} for channel ${channelId}: ${url}`);
+      }
+
+      if (url.includes(".m3u8")) {
+        console.log(`Detected m3u8 request for channel ${channelId}: ${url}`);
+        if (!m3u8Url) {
+          m3u8Url = url;
+        }
+      }
+    });
+
+    await page.goto(embedUrl, {
+      waitUntil: "networkidle2",
+      timeout: 45000
+    });
+
+    // Give page a moment
+    await sleep(3000);
+
+    // Click center as fallback (useful for overlay players)
+    try {
+      await page.mouse.click(640, 360, { button: "left" });
+      console.log(`Center click attempted for channel ${channelId}`);
+    } catch (e) {
+      console.log("Center click failed:", e.message);
+    }
+
+    // Try main-page click
+    try {
+      await tryClickPlayOnPage(page, channelId);
+    } catch (e) {
+      console.log("Main-page play click error:", e.message);
+    }
+
+    // Try iframe click
+    try {
+      await tryClickPlayInFrames(page, channelId);
+    } catch (e) {
+      console.log("Frame play click error:", e.message);
+    }
+
+    // Wait up to 45s for .m3u8
+    const maxWaitMs = 45000;
+    const stepMs = 1000;
+    let waited = 0;
+
+    while (!m3u8Url && waited < maxWaitMs) {
+      await sleep(stepMs);
+      waited += stepMs;
+    }
+
+    if (!m3u8Url) {
+      throw new Error("Could not detect m3u8 request for channel " + channelId);
+    }
+
+    console.log(`Final m3u8 for channel ${channelId} = ${m3u8Url}`);
+    return m3u8Url;
+  } finally {
+    await page.close();
+  }
+}
+
+// Refresh a single channel and update cache
+async function refreshChannel(id) {
+  const sourceUrl = CHANNEL_SOURCES[id];
+  if (!sourceUrl) {
+    console.warn("Unknown channel in refreshChannel:", id);
+    return;
+  }
+
+  const previous = channelCache[id]?.url || null;
+
+  try {
+    const freshUrl = await fetchM3u8FromEmbed(id);
+
+    if (!freshUrl) {
+      throw new Error("No m3u8 URL returned for channel " + id);
+    }
+
+    if (freshUrl !== previous) {
+      console.log(`Channel ${id} stream URL changed`);
       console.log("Old:", previous);
-      console.log("New:", m3u8);
+      console.log("New:", freshUrl);
     } else {
-      console.log(new Date().toISOString(), "-", `Channel ${id} URL unchanged`);
+      console.log(`Channel ${id} stream URL unchanged`);
     }
 
     channelCache[id] = {
-      url: m3u8,
+      url: freshUrl,
       lastUpdated: new Date().toISOString(),
       lastError: null
     };
   } catch (err) {
-    console.error(new Date().toISOString(), "-", "Error refreshing channel", id, err.message);
-
+    console.error("Error refreshing channel", id, err);
     channelCache[id].lastError = err.message;
   }
 }
 
+// Refresh all channels
 async function refreshAllChannels() {
-  console.log(new Date().toISOString(), "-", "Refreshing all channels...");
+  console.log("Refreshing all channels");
+  const ids = Object.keys(CHANNEL_SOURCES);
 
-  for (const id of Object.keys(CHANNEL_SOURCES)) {
+  for (const id of ids) {
     await refreshChannel(id);
   }
 
-  console.log(new Date().toISOString(), "-", "Refresh complete");
+  console.log("Refresh complete");
 }
 
 // ---------------------------------------------------------------------
-// API: Roku fetches playlist URL here
+// API endpoints
 // ---------------------------------------------------------------------
+
+// Roku hits this to get the current m3u8
 app.get("/api/channel/:id", async (req, res) => {
   const id = req.params.id;
 
   if (!CHANNEL_SOURCES[id]) {
-    return res.status(404).json({ error: "Unknown channel" });
+    return res.status(404).json({ error: "Unknown channel id" });
   }
 
   const cache = channelCache[id];
 
   try {
-    // Return cached if available
-    if (cache.url) {
+    // If we have a cached URL, return it
+    if (cache && cache.url) {
       return res.json({
         id,
         url: cache.url,
@@ -128,71 +335,59 @@ app.get("/api/channel/:id", async (req, res) => {
       });
     }
 
-    // Otherwise refresh live
-    await refreshChannel(id);
+    // No cache, scrape now
+    const url = await fetchM3u8FromEmbed(id);
 
-    if (channelCache[id].url) {
-      return res.json({
-        id,
-        url: channelCache[id].url,
-        lastUpdated: channelCache[id].lastUpdated,
-        cached: false,
-        lastError: null
-      });
-    }
+    channelCache[id] = {
+      url,
+      lastUpdated: new Date().toISOString(),
+      lastError: null
+    };
 
-    return res.status(500).json({ error: "No URL available for channel " + id });
+    return res.json({
+      id,
+      url,
+      lastUpdated: channelCache[id].lastUpdated,
+      cached: false,
+      lastError: null
+    });
   } catch (err) {
+    console.error("Error in /api/channel/:id", id, err);
+    channelCache[id].lastError = err.message;
     return res.status(500).json({ error: err.message });
   }
 });
 
-// ---------------------------------------------------------------------
-// DEBUG: Return full raw HTML from livehdtv (for testing access)
-// ---------------------------------------------------------------------
-app.get("/debug/html-10", async (req, res) => {
+// Manual refresh endpoint
+app.post("/admin/refresh", async (req, res) => {
   try {
-    const html = await fetchHtml(CHANNEL_SOURCES["10"], "10");
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.send(html);
+    await refreshAllChannels();
+    return res.json({ ok: true, cache: channelCache });
   } catch (err) {
-    res.status(500).send("Error fetching HTML: " + err.message);
+    console.error("Admin refresh error", err);
+    return res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/debug/html-12", async (req, res) => {
-  try {
-    const html = await fetchHtml(CHANNEL_SOURCES["12"], "12");
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.send(html);
-  } catch (err) {
-    res.status(500).send("Error fetching HTML: " + err.message);
-  }
-});
-
-// ---------------------------------------------------------------------
-// Status endpoint
-// ---------------------------------------------------------------------
+// Status endpoint to inspect cache
 app.get("/status", (req, res) => {
   res.json(channelCache);
 });
 
-// ---------------------------------------------------------------------
-// Hourly refresh
-// ---------------------------------------------------------------------
-const ONE_HOUR = 60 * 60 * 1000;
+// Schedule hourly refresh
+const ONE_HOUR_MS = 60 * 60 * 1000;
 setInterval(() => {
   refreshAllChannels().catch(err =>
-    console.error("Periodic refresh failed:", err.message)
+    console.error("Periodic refresh failed", err)
   );
-}, ONE_HOUR);
+}, ONE_HOUR_MS);
 
-// Run one refresh immediately at startup
+// Warm cache at startup
 refreshAllChannels().catch(err =>
-  console.error("Initial refresh failed:", err.message)
+  console.error("Initial refresh error", err)
 );
 
-// ---------------------------------------------------------------------
+// Start server
 app.listen(PORT, () => {
-  console.log(new Date().toISOString(), "-", "Server listening on port", PORT);
+  console.log("Server listening on port", PORT);
 });
