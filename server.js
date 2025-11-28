@@ -42,19 +42,27 @@ async function getBrowser() {
 async function tryClickPlayOnPage(page, channelId) {
   console.log(`Trying main-page play click for channel ${channelId}`);
 
-  // Channel-specific selectors (we can extend if you inspect the DOM)
+  // Channel-specific selectors
   const channelSelectors = {
-    "12": [
+    // livehdtv – JWPlayer-like
+    "10": [
       ".jw-icon-playback",
       ".jw-display-icon-container",
       ".jw-display-icon",
       ".jw-icon",
-      "button[aria-label='Play']"
-    ],
-    "10": [
-      ".vjs-big-play-button",
       "button[aria-label='Play']",
-      "button[title='Play']"
+      ".vjs-big-play-button"
+    ],
+    // CXTvLive – they use video.js, so we prioritize video.js selectors
+    "12": [
+      ".vjs-big-play-button",
+      ".vjs-play-control",
+      "button[title='Play']",
+      "button[aria-label='Play']",
+      ".jw-icon-playback",
+      ".jw-display-icon-container",
+      ".jw-display-icon",
+      ".jw-icon"
     ]
   };
 
@@ -77,13 +85,14 @@ async function tryClickPlayOnPage(page, channelId) {
   // Generic fallback inside the page
   await page.evaluate(() => {
     const genericSelectors = [
+      ".vjs-big-play-button",
+      ".vjs-play-control",
+      "button[aria-label='Play']",
+      "button[title='Play']",
       ".jw-icon-playback",
       ".jw-display-icon-container",
       ".jw-display-icon",
       ".jw-icon",
-      ".vjs-big-play-button",
-      "button[aria-label='Play']",
-      "button[title='Play']",
       "button.play"
     ];
 
@@ -107,17 +116,23 @@ async function tryClickPlayInFrames(page, channelId) {
   console.log(`Trying iframe play click for channel ${channelId}`);
 
   const channelSelectors = {
-    "12": [
+    "10": [
       ".jw-icon-playback",
       ".jw-display-icon-container",
       ".jw-display-icon",
       ".jw-icon",
-      "button[aria-label='Play']"
-    ],
-    "10": [
-      ".vjs-big-play-button",
       "button[aria-label='Play']",
-      "button[title='Play']"
+      ".vjs-big-play-button"
+    ],
+    "12": [
+      ".vjs-big-play-button",
+      ".vjs-play-control",
+      "button[title='Play']",
+      "button[aria-label='Play']",
+      ".jw-icon-playback",
+      ".jw-display-icon-container",
+      ".jw-display-icon",
+      ".jw-icon"
     ]
   };
 
@@ -129,7 +144,9 @@ async function tryClickPlayInFrames(page, channelId) {
       try {
         const exists = await frame.$(sel);
         if (exists) {
-          console.log(`Clicking selector in frame for channel ${channelId}: ${sel} (frame URL: ${frame.url()})`);
+          console.log(
+            `Clicking selector in frame for channel ${channelId}: ${sel} (frame URL: ${frame.url()})`
+          );
           await frame.click(sel);
           return;
         }
@@ -142,13 +159,14 @@ async function tryClickPlayInFrames(page, channelId) {
     try {
       await frame.evaluate(() => {
         const genericSelectors = [
+          ".vjs-big-play-button",
+          ".vjs-play-control",
+          "button[aria-label='Play']",
+          "button[title='Play']",
           ".jw-icon-playback",
           ".jw-display-icon-container",
           ".jw-display-icon",
           ".jw-icon",
-          ".vjs-big-play-button",
-          "button[aria-label='Play']",
-          "button[title='Play']",
           "button.play"
         ];
 
@@ -210,15 +228,22 @@ async function fetchM3u8FromEmbed(channelId) {
       }
     });
 
-    await page.goto(embedUrl, {
-      waitUntil: "networkidle2",
-      timeout: 45000
-    });
+    // Relaxed navigation: domcontentloaded, longer timeout, and don’t crash on timeout
+    try {
+      await page.goto(embedUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000
+      });
+    } catch (navErr) {
+      console.log(
+        `Navigation error for channel ${channelId}: ${navErr.message}. Continuing anyway.`
+      );
+    }
 
     // Give page a moment
     await sleep(3000);
 
-    // Click center as fallback (useful for overlay players)
+    // Fallback center click
     try {
       await page.mouse.click(640, 360, { button: "left" });
       console.log(`Center click attempted for channel ${channelId}`);
@@ -240,7 +265,7 @@ async function fetchM3u8FromEmbed(channelId) {
       console.log("Frame play click error:", e.message);
     }
 
-    // Wait up to 45s for .m3u8
+    // Wait up to 45s for .m3u8 after interactions
     const maxWaitMs = 45000;
     const stepMs = 1000;
     let waited = 0;
