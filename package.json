@@ -3,10 +3,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "npx puppeteer browsers install chrome && node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.0",
-    "puppeteer": "^23.4.0"
+    "express": "^4.19.0"
   }
 }
