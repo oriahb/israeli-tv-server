@@ -31,7 +31,7 @@ async function getBrowser() {
   return browserPromise;
 }
 
-// Try to click play on the main page
+// Try to click play on the main CXTvLive page
 async function clickPlayOnPage(page) {
   console.log("Channel 12: trying main-page play click");
 
@@ -48,55 +48,61 @@ async function clickPlayOnPage(page) {
     ".jw-icon-playback"
   ];
 
-  // Try direct click on selectors
   for (const sel of selectors) {
     try {
       const handle = await page.$(sel);
       if (handle) {
         console.log(`Channel 12: clicking selector on main page: ${sel}`);
         await handle.click();
-        await sleep(1000);
+        await sleep(800);
       }
     } catch (e) {
-      console.log(`Channel 12: error clicking ${sel} on main page:`, e.message);
+      console.log(
+        `Channel 12: error clicking ${sel} on main page:`,
+        e.message
+      );
     }
   }
 
-  // Generic “click everything that looks like a play button” fallback
-  await page.evaluate(() => {
-    const clickableSelectors = [
-      ".vjs-big-play-button",
-      ".vjs-play-control",
-      "button[title='Play']",
-      "button[aria-label='Play']",
-      ".play",
-      ".video-js",
-      ".jw-display-icon-container",
-      ".jw-icon-playback"
-    ];
+  // Generic fallback
+  try {
+    await page.evaluate(() => {
+      const clickableSelectors = [
+        ".vjs-big-play-button",
+        ".vjs-play-control",
+        "button[title='Play']",
+        "button[aria-label='Play']",
+        ".play",
+        ".video-js",
+        ".jw-display-icon-container",
+        ".jw-icon-playback"
+      ];
 
-    clickableSelectors.forEach(sel => {
-      document.querySelectorAll(sel).forEach(el => {
-        try {
-          el.click();
-        } catch {}
+      clickableSelectors.forEach(sel => {
+        document.querySelectorAll(sel).forEach(el => {
+          try {
+            el.click();
+          } catch {}
+        });
       });
-    });
 
-    const video = document.querySelector("video");
-    if (video) {
-      try {
-        video.click();
-      } catch {}
-    }
-  });
+      const video = document.querySelector("video");
+      if (video) {
+        try {
+          video.click();
+        } catch {}
+      }
+    });
+  } catch (e) {
+    console.log("Channel 12: error in main-page evaluate click:", e.message);
+  }
 }
 
-// Try to click play inside iframes
+// Try to click play inside frames, with special handling for MAKO
 async function clickPlayInFrames(page) {
   console.log("Channel 12: trying iframe play click");
 
-  const selectors = [
+  const genericSelectors = [
     ".vjs-big-play-button",
     ".vjs-play-control",
     "button[title='Play']",
@@ -109,14 +115,84 @@ async function clickPlayInFrames(page) {
 
   const frames = page.frames();
   for (const frame of frames) {
-    console.log("Channel 12: inspecting frame:", frame.url());
-    for (const sel of selectors) {
+    const url = frame.url();
+    console.log("Channel 12: inspecting frame:", url);
+
+    // SPECIAL CASE: MAKO EMBED FRAME
+    if (url.includes("mako.co.il")) {
+      try {
+        // First, log some HTML around #click_container so we know it's there
+        const hasClickContainer = await frame.evaluate(() => {
+          const el = document.querySelector("#click_container");
+          return !!el;
+        });
+
+        console.log(
+          "Channel 12: MAKO frame has #click_container:",
+          hasClickContainer
+        );
+
+        // Directly click the "sprite startPlay" inside #click_container
+        const clicked = await frame.evaluate(() => {
+          const btn = document.querySelector(
+            "#click_container .sprite.startPlay"
+          );
+          if (btn) {
+            try {
+              btn.click();
+            } catch {}
+            // Extra: dispatch mouse events to be safe
+            const rect = btn.getBoundingClientRect();
+            const evOpts = {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              clientX: rect.left + rect.width / 2,
+              clientY: rect.top + rect.height / 2
+            };
+            ["mousedown", "mouseup", "click"].forEach(type => {
+              try {
+                btn.dispatchEvent(new MouseEvent(type, evOpts));
+              } catch {}
+            });
+            return true;
+          }
+          return false;
+        });
+
+        console.log(
+          "Channel 12: clicked #click_container .sprite.startPlay in MAKO frame:",
+          clicked
+        );
+
+        // Give the player a moment to react
+        await sleep(2000);
+
+        // Also try to click any video element in the MAKO frame
+        await frame.evaluate(() => {
+          const video = document.querySelector("video");
+          if (video) {
+            try {
+              video.click();
+            } catch {}
+          }
+        });
+      } catch (e) {
+        console.log(
+          "Channel 12: error while clicking MAKO play button:",
+          e.message
+        );
+      }
+    }
+
+    // Generic clicks in all frames (including MAKO as fallback)
+    for (const sel of genericSelectors) {
       try {
         const handle = await frame.$(sel);
         if (handle) {
           console.log(`Channel 12: clicking selector in frame: ${sel}`);
           await handle.click();
-          await sleep(1000);
+          await sleep(800);
         }
       } catch (e) {
         // ignore
@@ -150,12 +226,12 @@ async function clickPlayInFrames(page) {
         }
       });
     } catch (e) {
-      // ignore frame errors
+      // ignore
     }
   }
 }
 
-// Core: load CXTvLive channel 12, simulate click, capture .m3u8
+// Core: load CXTvLive channel 12, simulate clicks, capture .m3u8
 async function fetchChannel12M3u8() {
   console.log(`Channel 12: fetching m3u8 from ${CHANNEL_URL}`);
 
@@ -184,7 +260,7 @@ async function fetchChannel12M3u8() {
       const url = req.url();
       requestCount += 1;
 
-      if (requestCount <= 15) {
+      if (requestCount <= 20) {
         console.log(`Channel 12 request ${requestCount}: ${url}`);
       }
 
@@ -196,6 +272,7 @@ async function fetchChannel12M3u8() {
       }
     });
 
+    // Load CXTvLive page
     try {
       await page.goto(CHANNEL_URL, {
         waitUntil: "domcontentloaded",
@@ -205,10 +282,10 @@ async function fetchChannel12M3u8() {
       console.log("Channel 12: navigation error, continuing:", e.message);
     }
 
-    // Wait a bit for scripts
-    await sleep(4000);
+    // Give scripts some time
+    await sleep(5000);
 
-    // Center click
+    // Center click on the main page
     try {
       await page.mouse.click(640, 360, { button: "left" });
       console.log("Channel 12: center click done");
@@ -216,12 +293,15 @@ async function fetchChannel12M3u8() {
       console.log("Channel 12: center click failed:", e.message);
     }
 
-    // Try clicks on page and frames
     await clickPlayOnPage(page);
+
+    // Let any iframes load
+    await sleep(5000);
+
     await clickPlayInFrames(page);
 
-    // Wait up to 60 seconds for any .m3u8
-    const maxWaitMs = 60000;
+    // Wait up to 90 seconds for any .m3u8
+    const maxWaitMs = 90000;
     const stepMs = 1000;
     let waited = 0;
 
@@ -333,7 +413,7 @@ app.get("/debug/html-12", async (req, res) => {
   }
 });
 
-// Manual refresh
+// Manual refresh endpoint
 app.post("/admin/refresh-12", async (req, res) => {
   try {
     await refreshChannel12();
@@ -351,7 +431,7 @@ setInterval(() => {
   );
 }, ONE_HOUR);
 
-// Initial refresh
+// Initial refresh at startup
 refreshChannel12().catch(err =>
   console.error("Channel 12: initial refresh error:", err.message)
 );
