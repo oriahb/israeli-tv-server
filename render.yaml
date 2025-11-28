@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: israeli-tv-server
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20.11.0
+      - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
+        value: false
