@@ -1,256 +1,120 @@
 import express from "express";
-import puppeteer from "puppeteer";
 
 const app = express();
-
-// Render will set PORT env var. Fallback to 10000 for local.
 const PORT = process.env.PORT || 10000;
 
-// Simple sleep helper
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Source pages for each channel
-const CHANNEL_SOURCES = {
+// LiveHDTV embed pages for each channel
+const CHANNEL_PAGES = {
   "10": "https://www.livehdtv.com/embed/arutz10",
   "12": "https://www.livehdtv.com/embed/channel-12-live-stream-from-israel"
 };
 
-// Cached state
+// Cache structure
 const channelCache = {
   "10": { url: null, lastUpdated: null, lastError: null },
   "12": { url: null, lastUpdated: null, lastError: null }
 };
 
-let browserPromise = null;
-
-// ---------------------------------------------------------------------
-// Shared browser instance
-// ---------------------------------------------------------------------
-async function getBrowser() {
-  if (!browserPromise) {
-    console.log("Launching Puppeteer browser");
-    browserPromise = puppeteer.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox"
-      ]
-    });
-  }
-  return browserPromise;
+// Small helper so logs are readable
+function log(...args) {
+  console.log(new Date().toISOString(), "-", ...args);
 }
 
 // ---------------------------------------------------------------------
-// Click helpers
+// Core: fetch HTML and extract JWPlayer file URL
 // ---------------------------------------------------------------------
-async function tryClickPlayOnPage(page) {
-  await page.evaluate(() => {
-    const selectors = [
-      ".vjs-big-play-button",
-      "button[aria-label='Play']",
-      "button[title='Play']",
-      "button.play",
-      ".plyr__control--overlaid"
-    ];
+async function fetchTokenizedUrl(channelId) {
+  const pageUrl = CHANNEL_PAGES[channelId];
+  if (!pageUrl) {
+    throw new Error(`Unknown channel id: ${channelId}`);
+  }
 
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (el) {
-        el.click();
-        return;
-      }
-    }
+  log("Fetching HTML for channel", channelId, "from", pageUrl);
 
-    const video = document.querySelector("video");
-    if (video) {
-      video.click();
+  const res = await fetch(pageUrl, {
+    method: "GET",
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/131.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9"
     }
   });
-}
 
-async function tryClickPlayInFrames(page) {
-  const frames = page.frames();
-  for (const frame of frames) {
-    try {
-      await frame.evaluate(() => {
-        const selectors = [
-          ".vjs-big-play-button",
-          "button[aria-label='Play']",
-          "button[title='Play']",
-          "button.play",
-          ".plyr__control--overlaid"
-        ];
-
-        for (const sel of selectors) {
-          const el = document.querySelector(sel);
-          if (el) {
-            el.click();
-            return;
-          }
-        }
-
-        const video = document.querySelector("video");
-        if (video) {
-          video.click();
-        }
-      });
-    } catch (e) {
-      // ignore frame errors
-    }
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} while fetching channel ${channelId}`);
   }
-}
 
-// ---------------------------------------------------------------------
-// Core scraper: open embed page, click play, capture m3u8
-// ---------------------------------------------------------------------
-async function fetchM3u8FromEmbed(channelId) {
-  const embedUrl = CHANNEL_SOURCES[channelId];
-  if (!embedUrl) throw new Error("Unknown channel " + channelId);
+  const html = await res.text();
 
-  console.log("Fetching m3u8 for channel", channelId, "from", embedUrl);
+  // Look for: file: "https://...m3u8?token=..."
+  const fileRegex = /file\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i;
+  const match = html.match(fileRegex);
 
-  const browser = await getBrowser();
-  const page = await browser.newPage();
-
-  let m3u8Url = null;
-  let requestCount = 0;
-
-  try {
-    await page.setViewport({ width: 1280, height: 720 });
-
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-      "AppleWebKit/537.36 (KHTML, like Gecko) " +
-      "Chrome/131.0.0.0 Safari/537.36"
-    );
-
-    // Log first few requests for debugging and capture .m3u8
-    page.on("request", req => {
-      const url = req.url();
-      requestCount += 1;
-
-      if (requestCount <= 10) {
-        console.log("Sample request", requestCount, "for channel", channelId, ":", url);
-      }
-
-      if (url.includes(".m3u8")) {
-        console.log("Detected m3u8 request for channel", channelId, ":", url);
-        if (!m3u8Url) {
-          m3u8Url = url;
-        }
-      }
-    });
-
-    await page.goto(embedUrl, {
-      waitUntil: "networkidle2",
-      timeout: 45000
-    });
-
-    // Give the player some time
-    await sleep(3000);
-
-    // Try clicking center of viewport as a dumb but effective fallback
-    try {
-      await page.mouse.click(640, 360, { button: "left" });
-    } catch (e) {
-      console.log("Center click failed:", e.message);
-    }
-
-    // Try click on main page
-    try {
-      await tryClickPlayOnPage(page);
-    } catch (e) {
-      console.log("Main-page play click error:", e.message);
-    }
-
-    // Try clicking inside iframes too
-    try {
-      await tryClickPlayInFrames(page);
-    } catch (e) {
-      console.log("Frame play click error:", e.message);
-    }
-
-    // Wait up to 45s for .m3u8 to show up
-    const maxWaitMs = 45000;
-    const stepMs = 1000;
-    let waited = 0;
-
-    while (!m3u8Url && waited < maxWaitMs) {
-      await sleep(stepMs);
-      waited += stepMs;
-    }
-
-    if (!m3u8Url) {
-      throw new Error("Could not detect m3u8 request for channel " + channelId);
-    }
-
-    console.log("Final m3u8 for channel", channelId, "=", m3u8Url);
-    return m3u8Url;
-  } finally {
-    await page.close();
+  if (!match) {
+    throw new Error(`Could not find m3u8 file URL in JWPlayer config for channel ${channelId}`);
   }
+
+  const url = match[1];
+  log("Extracted m3u8 URL for channel", channelId, "=", url);
+
+  return url;
 }
 
 // ---------------------------------------------------------------------
 // Refresh logic with change detection
 // ---------------------------------------------------------------------
-async function refreshChannel(id) {
-  const sourceUrl = CHANNEL_SOURCES[id];
-  if (!sourceUrl) {
-    console.warn("Unknown channel in refreshChannel:", id);
-    return;
-  }
-
-  const previous = channelCache[id]?.url || null;
+async function refreshChannel(channelId) {
+  const previous = channelCache[channelId]?.url || null;
 
   try {
-    const freshUrl = await fetchM3u8FromEmbed(id);
+    const newUrl = await fetchTokenizedUrl(channelId);
 
-    if (!freshUrl) {
-      throw new Error("No m3u8 URL returned for channel " + id);
+    if (!newUrl) {
+      throw new Error(`Empty URL returned for channel ${channelId}`);
     }
 
-    if (freshUrl !== previous) {
-      console.log(`Channel ${id} stream URL changed`);
-      console.log("Old:", previous);
-      console.log("New:", freshUrl);
+    if (newUrl !== previous) {
+      log(`Channel ${channelId} URL changed`);
+      log("Old:", previous);
+      log("New:", newUrl);
     } else {
-      console.log(`Channel ${id} stream URL unchanged`);
+      log(`Channel ${channelId} URL unchanged`);
     }
 
-    channelCache[id] = {
-      url: freshUrl,
+    channelCache[channelId] = {
+      url: newUrl,
       lastUpdated: new Date().toISOString(),
       lastError: null
     };
   } catch (err) {
-    console.error("Error refreshing channel", id, err);
-    channelCache[id].lastError = err.message;
+    log("Error refreshing channel", channelId, err.message);
+    channelCache[channelId].lastError = err.message;
   }
 }
 
 async function refreshAllChannels() {
-  console.log("Refreshing all channels");
-  const ids = Object.keys(CHANNEL_SOURCES);
+  log("Refreshing all channels");
+  const ids = Object.keys(CHANNEL_PAGES);
 
   for (const id of ids) {
     await refreshChannel(id);
   }
 
-  console.log("Refresh complete");
+  log("Refresh complete");
 }
 
 // ---------------------------------------------------------------------
 // API endpoints
 // ---------------------------------------------------------------------
 
-// Roku calls this
+// Roku calls this to get the current URL
 app.get("/api/channel/:id", async (req, res) => {
   const id = req.params.id;
 
-  if (!CHANNEL_SOURCES[id]) {
+  if (!CHANNEL_PAGES[id]) {
     return res.status(404).json({ error: "Unknown channel id" });
   }
 
@@ -268,8 +132,8 @@ app.get("/api/channel/:id", async (req, res) => {
       });
     }
 
-    // No cache, try fresh scrape
-    const url = await fetchM3u8FromEmbed(id);
+    // No cache yet? Fetch fresh
+    const url = await fetchTokenizedUrl(id);
 
     channelCache[id] = {
       url,
@@ -285,24 +149,24 @@ app.get("/api/channel/:id", async (req, res) => {
       lastError: null
     });
   } catch (err) {
-    console.error("Error in /api/channel/:id", id, err);
+    log("Error in /api/channel/:id", id, err.message);
     channelCache[id].lastError = err.message;
     return res.status(500).json({ error: err.message });
   }
 });
 
-// Manual refresh endpoint (good for Render Cron or debugging)
+// Manual refresh (for you or Render cron)
 app.post("/admin/refresh", async (req, res) => {
   try {
     await refreshAllChannels();
     return res.json({ ok: true, cache: channelCache });
   } catch (err) {
-    console.error("Admin refresh error", err);
+    log("Admin refresh error", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// Status endpoint to see current cache
+// Quick status view
 app.get("/status", (req, res) => {
   res.json(channelCache);
 });
@@ -313,13 +177,13 @@ app.get("/status", (req, res) => {
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
 setInterval(() => {
-  refreshAllChannels().catch(err => console.error("Periodic refresh failed", err));
+  refreshAllChannels().catch(err => log("Periodic refresh failed", err.message));
 }, ONE_HOUR_MS);
 
 // Warm cache on startup
-refreshAllChannels().catch(err => console.error("Initial refresh error", err));
+refreshAllChannels().catch(err => log("Initial refresh error", err.message));
 
 // ---------------------------------------------------------------------
 app.listen(PORT, () => {
-  console.log("Server listening on port", PORT);
+  log("Server listening on port", PORT);
 });
