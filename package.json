@@ -6,7 +6,7 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "@playwright/test": "^1.48.0",
-    "express": "^4.19.0"
+    "express": "^4.19.0",
+    "puppeteer": "^23.4.0"
   }
 }
