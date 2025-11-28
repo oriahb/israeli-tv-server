@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer');
+const chromium = require('chrome-aws-lambda');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -36,16 +36,12 @@ async function fetchM3u8WithPuppeteer(pageUrl, channelName) {
   
   let browser;
   try {
-    // Launch headless Chrome
+    // Launch headless Chrome with Render-compatible settings
     browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu'
-      ]
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath,
+      headless: chromium.headless
     });
 
     const page = await browser.newPage();
