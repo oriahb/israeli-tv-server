@@ -1,5 +1,4 @@
 import express from "express";
-import fetch from "node-fetch";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -21,12 +20,13 @@ const channelCache = {
 };
 
 // ---------------------------------------------------------------------
-// Helper: fetch raw HTML from livehdtv
+// Helper: fetch raw HTML from livehdtv using Node 22 native fetch
 // ---------------------------------------------------------------------
 async function fetchHtml(url, channelId) {
   console.log(new Date().toISOString(), "-", "Fetching HTML for channel", channelId);
 
   const res = await fetch(url, {
+    method: "GET",
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
@@ -42,14 +42,15 @@ async function fetchHtml(url, channelId) {
     throw new Error(`HTTP ${res.status} while fetching channel ${channelId}`);
   }
 
-  return await res.text();
+  const html = await res.text();
+  return html;
 }
 
 // ---------------------------------------------------------------------
 // Extract m3u8 URL from JWPlayer setup
 // ---------------------------------------------------------------------
 function extractM3u8FromHtml(html, channelId) {
-  // Pattern: file: "https://....m3u8?token=..."
+  // Looks for: file: "https://....m3u8?token=..."
   const fileRegex = /file\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i;
   const match = html.match(fileRegex);
 
@@ -181,11 +182,15 @@ app.get("/status", (req, res) => {
 // ---------------------------------------------------------------------
 const ONE_HOUR = 60 * 60 * 1000;
 setInterval(() => {
-  refreshAllChannels().catch(err => console.error("Periodic refresh failed:", err.message));
+  refreshAllChannels().catch(err =>
+    console.error("Periodic refresh failed:", err.message)
+  );
 }, ONE_HOUR);
 
 // Run one refresh immediately at startup
-refreshAllChannels().catch(err => console.error("Initial refresh failed:", err.message));
+refreshAllChannels().catch(err =>
+  console.error("Initial refresh failed:", err.message)
+);
 
 // ---------------------------------------------------------------------
 app.listen(PORT, () => {
