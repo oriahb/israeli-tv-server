@@ -2,7 +2,12 @@ import express from "express";
 import puppeteer from "puppeteer";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
+
+// Simple sleep helper to replace page.waitForTimeout
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // Source pages for each channel
 const CHANNEL_SOURCES = {
@@ -67,7 +72,7 @@ async function fetchM3u8FromEmbed(channelId) {
     });
 
     // Give the player time to load
-    await page.waitForTimeout(2000);
+    await sleep(2000);
 
     // Try to click a play button
     await page.evaluate(() => {
@@ -99,7 +104,7 @@ async function fetchM3u8FromEmbed(channelId) {
     let waited = 0;
 
     while (!m3u8Url && waited < maxWaitMs) {
-      await page.waitForTimeout(stepMs);
+      await sleep(stepMs);
       waited += stepMs;
     }
 
