@@ -1,5 +1,5 @@
 import express from "express";
-import { chromium } from "@playwright/test";
+import puppeteer from "puppeteer";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,6 +16,25 @@ const channelCache = {
   "12": { url: null, lastUpdated: null, lastError: null }
 };
 
+let browserPromise = null;
+
+// ---------------------------------------------------------------------
+// Shared browser instance
+// ---------------------------------------------------------------------
+async function getBrowser() {
+  if (!browserPromise) {
+    console.log("Launching Puppeteer browser");
+    browserPromise = puppeteer.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox"
+      ]
+    });
+  }
+  return browserPromise;
+}
+
 // ---------------------------------------------------------------------
 // Core scraper: open embed page, click play, capture m3u8
 // ---------------------------------------------------------------------
@@ -25,15 +44,15 @@ async function fetchM3u8FromEmbed(channelId) {
 
   console.log("Fetching m3u8 for channel", channelId, "from", embedUrl);
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+
+  let m3u8Url = null;
 
   try {
-    const page = await browser.newPage();
-
-    let m3u8Url = null;
-
-    page.on("request", request => {
-      const url = request.url();
+    // Listen for any network request containing .m3u8
+    page.on("request", req => {
+      const url = req.url();
       if (url.includes(".m3u8")) {
         console.log("Detected m3u8 request for channel", channelId, ":", url);
         if (!m3u8Url) {
@@ -42,9 +61,12 @@ async function fetchM3u8FromEmbed(channelId) {
       }
     });
 
-    await page.goto(embedUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.goto(embedUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000
+    });
 
-    // small delay for player to initialize
+    // Give the player time to load
     await page.waitForTimeout(2000);
 
     // Try to click a play button
@@ -71,6 +93,7 @@ async function fetchM3u8FromEmbed(channelId) {
       }
     });
 
+    // Wait up to 15s for .m3u8 to show up
     const maxWaitMs = 15000;
     const stepMs = 500;
     let waited = 0;
@@ -87,7 +110,7 @@ async function fetchM3u8FromEmbed(channelId) {
     console.log("Final m3u8 for channel", channelId, "=", m3u8Url);
     return m3u8Url;
   } finally {
-    await browser.close();
+    await page.close();
   }
 }
 
@@ -143,6 +166,8 @@ async function refreshAllChannels() {
 // ---------------------------------------------------------------------
 // API endpoints
 // ---------------------------------------------------------------------
+
+// Roku calls this
 app.get("/api/channel/:id", async (req, res) => {
   const id = req.params.id;
 
@@ -164,7 +189,7 @@ app.get("/api/channel/:id", async (req, res) => {
       });
     }
 
-    // No cache, try fresh
+    // No cache, try fresh scrape
     const url = await fetchM3u8FromEmbed(id);
 
     channelCache[id] = {
@@ -187,7 +212,7 @@ app.get("/api/channel/:id", async (req, res) => {
   }
 });
 
-// Manual refresh endpoint (for cron or manual debugging)
+// Manual refresh endpoint (good for Render Cron or debugging)
 app.post("/admin/refresh", async (req, res) => {
   try {
     await refreshAllChannels();
