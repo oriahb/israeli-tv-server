@@ -1,45 +1,40 @@
 import express from "express";
+import fetch from "node-fetch";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// LiveHDTV embed pages for each channel
-const CHANNEL_PAGES = {
+// ---------------------------------------------------------------------
+// Channel embed sources
+// ---------------------------------------------------------------------
+const CHANNEL_SOURCES = {
   "10": "https://www.livehdtv.com/embed/arutz10",
   "12": "https://www.livehdtv.com/embed/channel-12-live-stream-from-israel"
 };
 
-// Cache structure
+// ---------------------------------------------------------------------
+// Cache
+// ---------------------------------------------------------------------
 const channelCache = {
   "10": { url: null, lastUpdated: null, lastError: null },
   "12": { url: null, lastUpdated: null, lastError: null }
 };
 
-// Small helper so logs are readable
-function log(...args) {
-  console.log(new Date().toISOString(), "-", ...args);
-}
-
 // ---------------------------------------------------------------------
-// Core: fetch HTML and extract JWPlayer file URL
+// Helper: fetch raw HTML from livehdtv
 // ---------------------------------------------------------------------
-async function fetchTokenizedUrl(channelId) {
-  const pageUrl = CHANNEL_PAGES[channelId];
-  if (!pageUrl) {
-    throw new Error(`Unknown channel id: ${channelId}`);
-  }
+async function fetchHtml(url, channelId) {
+  console.log(new Date().toISOString(), "-", "Fetching HTML for channel", channelId);
 
-  log("Fetching HTML for channel", channelId, "from", pageUrl);
-
-  const res = await fetch(pageUrl, {
-    method: "GET",
+  const res = await fetch(url, {
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
         "AppleWebKit/537.36 (KHTML, like Gecko) " +
         "Chrome/131.0.0.0 Safari/537.36",
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9"
+      "Accept-Language": "en-US,en;q=0.9",
+      "Connection": "keep-alive"
     }
   });
 
@@ -47,82 +42,82 @@ async function fetchTokenizedUrl(channelId) {
     throw new Error(`HTTP ${res.status} while fetching channel ${channelId}`);
   }
 
-  const html = await res.text();
-
-  // Look for: file: "https://...m3u8?token=..."
-  const fileRegex = /file\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i;
-  const match = html.match(fileRegex);
-
-  if (!match) {
-    throw new Error(`Could not find m3u8 file URL in JWPlayer config for channel ${channelId}`);
-  }
-
-  const url = match[1];
-  log("Extracted m3u8 URL for channel", channelId, "=", url);
-
-  return url;
+  return await res.text();
 }
 
 // ---------------------------------------------------------------------
-// Refresh logic with change detection
+// Extract m3u8 URL from JWPlayer setup
 // ---------------------------------------------------------------------
-async function refreshChannel(channelId) {
-  const previous = channelCache[channelId]?.url || null;
+function extractM3u8FromHtml(html, channelId) {
+  // Pattern: file: "https://....m3u8?token=..."
+  const fileRegex = /file\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i;
+  const match = html.match(fileRegex);
+
+  if (!match) {
+    throw new Error("Could not find m3u8 token in JWPlayer config for channel " + channelId);
+  }
+
+  return match[1];
+}
+
+// ---------------------------------------------------------------------
+// Refresh logic
+// ---------------------------------------------------------------------
+async function refreshChannel(id) {
+  const url = CHANNEL_SOURCES[id];
+  if (!url) return;
+
+  const previous = channelCache[id].url;
 
   try {
-    const newUrl = await fetchTokenizedUrl(channelId);
+    const html = await fetchHtml(url, id);
+    const m3u8 = extractM3u8FromHtml(html, id);
 
-    if (!newUrl) {
-      throw new Error(`Empty URL returned for channel ${channelId}`);
-    }
-
-    if (newUrl !== previous) {
-      log(`Channel ${channelId} URL changed`);
-      log("Old:", previous);
-      log("New:", newUrl);
+    if (m3u8 !== previous) {
+      console.log(new Date().toISOString(), "-", `Channel ${id} URL updated`);
+      console.log("Old:", previous);
+      console.log("New:", m3u8);
     } else {
-      log(`Channel ${channelId} URL unchanged`);
+      console.log(new Date().toISOString(), "-", `Channel ${id} URL unchanged`);
     }
 
-    channelCache[channelId] = {
-      url: newUrl,
+    channelCache[id] = {
+      url: m3u8,
       lastUpdated: new Date().toISOString(),
       lastError: null
     };
   } catch (err) {
-    log("Error refreshing channel", channelId, err.message);
-    channelCache[channelId].lastError = err.message;
+    console.error(new Date().toISOString(), "-", "Error refreshing channel", id, err.message);
+
+    channelCache[id].lastError = err.message;
   }
 }
 
 async function refreshAllChannels() {
-  log("Refreshing all channels");
-  const ids = Object.keys(CHANNEL_PAGES);
+  console.log(new Date().toISOString(), "-", "Refreshing all channels...");
 
-  for (const id of ids) {
+  for (const id of Object.keys(CHANNEL_SOURCES)) {
     await refreshChannel(id);
   }
 
-  log("Refresh complete");
+  console.log(new Date().toISOString(), "-", "Refresh complete");
 }
 
 // ---------------------------------------------------------------------
-// API endpoints
+// API: Roku fetches playlist URL here
 // ---------------------------------------------------------------------
-
-// Roku calls this to get the current URL
 app.get("/api/channel/:id", async (req, res) => {
   const id = req.params.id;
 
-  if (!CHANNEL_PAGES[id]) {
-    return res.status(404).json({ error: "Unknown channel id" });
+  if (!CHANNEL_SOURCES[id]) {
+    return res.status(404).json({ error: "Unknown channel" });
   }
 
   const cache = channelCache[id];
 
   try {
-    // If we have a cached URL, return it
-    if (cache && cache.url) {
+    // Return cached if available
+    if (cache.url) {
       return res.json({
         id,
         url: cache.url,
@@ -132,58 +127,67 @@ app.get("/api/channel/:id", async (req, res) => {
       });
     }
 
-    // No cache yet? Fetch fresh
-    const url = await fetchTokenizedUrl(id);
+    // Otherwise refresh live
+    await refreshChannel(id);
 
-    channelCache[id] = {
-      url,
-      lastUpdated: new Date().toISOString(),
-      lastError: null
-    };
+    if (channelCache[id].url) {
+      return res.json({
+        id,
+        url: channelCache[id].url,
+        lastUpdated: channelCache[id].lastUpdated,
+        cached: false,
+        lastError: null
+      });
+    }
 
-    return res.json({
-      id,
-      url,
-      lastUpdated: channelCache[id].lastUpdated,
-      cached: false,
-      lastError: null
-    });
+    return res.status(500).json({ error: "No URL available for channel " + id });
   } catch (err) {
-    log("Error in /api/channel/:id", id, err.message);
-    channelCache[id].lastError = err.message;
     return res.status(500).json({ error: err.message });
   }
 });
 
-// Manual refresh (for you or Render cron)
-app.post("/admin/refresh", async (req, res) => {
+// ---------------------------------------------------------------------
+// DEBUG: Return full raw HTML from livehdtv (for testing access)
+// ---------------------------------------------------------------------
+app.get("/debug/html-10", async (req, res) => {
   try {
-    await refreshAllChannels();
-    return res.json({ ok: true, cache: channelCache });
+    const html = await fetchHtml(CHANNEL_SOURCES["10"], "10");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.send(html);
   } catch (err) {
-    log("Admin refresh error", err.message);
-    return res.status(500).json({ error: err.message });
+    res.status(500).send("Error fetching HTML: " + err.message);
   }
 });
 
-// Quick status view
+app.get("/debug/html-12", async (req, res) => {
+  try {
+    const html = await fetchHtml(CHANNEL_SOURCES["12"], "12");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.send(html);
+  } catch (err) {
+    res.status(500).send("Error fetching HTML: " + err.message);
+  }
+});
+
+// ---------------------------------------------------------------------
+// Status endpoint
+// ---------------------------------------------------------------------
 app.get("/status", (req, res) => {
   res.json(channelCache);
 });
 
 // ---------------------------------------------------------------------
-// Schedule hourly refresh
+// Hourly refresh
 // ---------------------------------------------------------------------
-const ONE_HOUR_MS = 60 * 60 * 1000;
-
+const ONE_HOUR = 60 * 60 * 1000;
 setInterval(() => {
-  refreshAllChannels().catch(err => log("Periodic refresh failed", err.message));
-}, ONE_HOUR_MS);
+  refreshAllChannels().catch(err => console.error("Periodic refresh failed:", err.message));
+}, ONE_HOUR);
 
-// Warm cache on startup
-refreshAllChannels().catch(err => log("Initial refresh error", err.message));
+// Run one refresh immediately at startup
+refreshAllChannels().catch(err => console.error("Initial refresh failed:", err.message));
 
 // ---------------------------------------------------------------------
 app.listen(PORT, () => {
-  log("Server listening on port", PORT);
+  console.log(new Date().toISOString(), "-", "Server listening on port", PORT);
 });
