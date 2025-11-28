@@ -2,9 +2,11 @@ import express from "express";
 import puppeteer from "puppeteer";
 
 const app = express();
+
+// Render will set PORT env var. Fallback to 10000 for local.
 const PORT = process.env.PORT || 10000;
 
-// Simple sleep helper to replace page.waitForTimeout
+// Simple sleep helper
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -41,6 +43,66 @@ async function getBrowser() {
 }
 
 // ---------------------------------------------------------------------
+// Click helpers
+// ---------------------------------------------------------------------
+async function tryClickPlayOnPage(page) {
+  await page.evaluate(() => {
+    const selectors = [
+      ".vjs-big-play-button",
+      "button[aria-label='Play']",
+      "button[title='Play']",
+      "button.play",
+      ".plyr__control--overlaid"
+    ];
+
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el) {
+        el.click();
+        return;
+      }
+    }
+
+    const video = document.querySelector("video");
+    if (video) {
+      video.click();
+    }
+  });
+}
+
+async function tryClickPlayInFrames(page) {
+  const frames = page.frames();
+  for (const frame of frames) {
+    try {
+      await frame.evaluate(() => {
+        const selectors = [
+          ".vjs-big-play-button",
+          "button[aria-label='Play']",
+          "button[title='Play']",
+          "button.play",
+          ".plyr__control--overlaid"
+        ];
+
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el) {
+            el.click();
+            return;
+          }
+        }
+
+        const video = document.querySelector("video");
+        if (video) {
+          video.click();
+        }
+      });
+    } catch (e) {
+      // ignore frame errors
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
 // Core scraper: open embed page, click play, capture m3u8
 // ---------------------------------------------------------------------
 async function fetchM3u8FromEmbed(channelId) {
@@ -53,11 +115,26 @@ async function fetchM3u8FromEmbed(channelId) {
   const page = await browser.newPage();
 
   let m3u8Url = null;
+  let requestCount = 0;
 
   try {
-    // Listen for any network request containing .m3u8
+    await page.setViewport({ width: 1280, height: 720 });
+
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+      "AppleWebKit/537.36 (KHTML, like Gecko) " +
+      "Chrome/131.0.0.0 Safari/537.36"
+    );
+
+    // Log first few requests for debugging and capture .m3u8
     page.on("request", req => {
       const url = req.url();
+      requestCount += 1;
+
+      if (requestCount <= 10) {
+        console.log("Sample request", requestCount, "for channel", channelId, ":", url);
+      }
+
       if (url.includes(".m3u8")) {
         console.log("Detected m3u8 request for channel", channelId, ":", url);
         if (!m3u8Url) {
@@ -67,40 +144,37 @@ async function fetchM3u8FromEmbed(channelId) {
     });
 
     await page.goto(embedUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000
+      waitUntil: "networkidle2",
+      timeout: 45000
     });
 
-    // Give the player time to load
-    await sleep(2000);
+    // Give the player some time
+    await sleep(3000);
 
-    // Try to click a play button
-    await page.evaluate(() => {
-      const selectors = [
-        ".vjs-big-play-button",
-        "button[aria-label='Play']",
-        "button[title='Play']",
-        "button.play",
-        ".plyr__control--overlaid"
-      ];
+    // Try clicking center of viewport as a dumb but effective fallback
+    try {
+      await page.mouse.click(640, 360, { button: "left" });
+    } catch (e) {
+      console.log("Center click failed:", e.message);
+    }
 
-      for (const sel of selectors) {
-        const el = document.querySelector(sel);
-        if (el) {
-          el.click();
-          return;
-        }
-      }
+    // Try click on main page
+    try {
+      await tryClickPlayOnPage(page);
+    } catch (e) {
+      console.log("Main-page play click error:", e.message);
+    }
 
-      const video = document.querySelector("video");
-      if (video) {
-        video.click();
-      }
-    });
+    // Try clicking inside iframes too
+    try {
+      await tryClickPlayInFrames(page);
+    } catch (e) {
+      console.log("Frame play click error:", e.message);
+    }
 
-    // Wait up to 15s for .m3u8 to show up
-    const maxWaitMs = 15000;
-    const stepMs = 500;
+    // Wait up to 45s for .m3u8 to show up
+    const maxWaitMs = 45000;
+    const stepMs = 1000;
     let waited = 0;
 
     while (!m3u8Url && waited < maxWaitMs) {
